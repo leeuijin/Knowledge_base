@@ -1,0 +1,335 @@
+======================================================================================================
+파티션 테이블의 rootpartition에 통계정보가 갱신되지 않는 문제
+======================================================================================================
+핵심 요약
+    파티션 테이블에 신규 리프 파티션(Leaf Partition)을 추가한 후에는 반드시 해당 파티션에 대한 최초 ANALYZE 작업을 수행해야 합니다.
+
+주요 문제점
+    통계 정보 미갱신: 추가된 리프 파티션 중 단 하나라도 ANALYZE가 진행되지 않으면, 이후 해당 파티션에 데이터 변경(INSERT/UPDATE 등)이 발생해도 Root Partition에 통계 정보가 반영되지 않습니다.
+    성능 영향: Root Partition 수준의 통계가 갱신되지 않으면 쿼리 옵티마이저가 잘못된 실행 계획을 생성할 위험이 있습니다.
+
+대응 가이드
+    파티션 생성 후 데이터 입력 및 사용 이전에 해당 신규 리프 파티션에 대해 ANALYZE를 필수적으로 실행해야 정상적인 통계 갱신 체계가 유지됩니다.
+
+개선이 필요한 점
+
+    자동으로 리프 파티션이 추가되면 자동으로 추가된 리프 파티션에 ANALYZE 작업이 자동으로 실행되었으면 좋겠음
+======================================================================================================
+테스트 내용
+======================================================================================================
+
+-- 테스트 신규 파티션 테이블 생성
+DROP TABLE production_lot;
+
+CREATE TABLE production_lot (
+    lot_id BIGINT,
+    lot_number VARCHAR(50),
+    product_id INT,
+    equipment_id INT,
+    production_date DATE,
+    quantity INT,
+    status VARCHAR(20)
+)
+WITH (
+    appendoptimized=true,
+    orientation=column,
+    compresstype=zstd,
+    compresslevel=7
+)
+DISTRIBUTED BY (lot_id)
+PARTITION BY RANGE (production_date)
+(
+    START ('2026-01-01') END ('2026-12-31') EVERY (INTERVAL '1 month')
+);
+
+kbc=# \d+ production_lot;
+                                               Append-Only Columnar Table "public.production_lot"
+     Column      |         Type          | Modifiers | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description
+-----------------+-----------------------+-----------+----------+--------------+------------------+-------------------+------------+-------------
+ lot_id          | bigint                |           | plain    |              | zstd             | 7                 | 32768      |
+ lot_number      | character varying(50) |           | extended |              | zstd             | 7                 | 32768      |
+ product_id      | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ equipment_id    | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ production_date | date                  |           | plain    |              | zstd             | 7                 | 32768      |
+ quantity        | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ status          | character varying(20) |           | extended |              | zstd             | 7                 | 32768      |
+Checksum: t
+Child tables: production_lot_1_prt_1,
+              production_lot_1_prt_10,
+              production_lot_1_prt_11,
+              production_lot_1_prt_12,
+              production_lot_1_prt_2,
+              production_lot_1_prt_3,
+              production_lot_1_prt_4,
+              production_lot_1_prt_5,
+              production_lot_1_prt_6,
+              production_lot_1_prt_7,
+              production_lot_1_prt_8,
+              production_lot_1_prt_9
+Distributed by: (lot_id)
+Partition by: (production_date)
+Options: appendonly=true, orientation=column, compresstype=zstd, compresslevel=7
+
+-- 더미 데이터 생성
+INSERT INTO production_lot
+SELECT 
+    gs AS lot_id,
+    'LOT-'||to_char(gs,'FM000000') AS lot_number,
+    (random()*9+1)::int AS product_id,
+    (random()*4+1)::int AS equipment_id,
+    DATE '2026-01-01' + (random()*360)::int AS production_date,
+    (random()*9000+1000)::int AS quantity,
+    CASE WHEN random() < 0.92 THEN 'COMPLETED'
+         WHEN random() < 0.97 THEN 'IN_PROGRESS'
+         ELSE 'SCRAPPED' END
+FROM generate_series(1,5000) gs;
+-- 파티션별 데이터 확인
+select date_trunc('month', production_date ) mon, count(*)
+from   production_lot
+group by 1
+order by 1;
+          mon           | count
+------------------------+-------
+ 2026-01-01 00:00:00+09 |   416
+ 2026-02-01 00:00:00+09 |   409
+ 2026-03-01 00:00:00+09 |   458
+ 2026-04-01 00:00:00+09 |   453
+ 2026-05-01 00:00:00+09 |   391
+ 2026-06-01 00:00:00+09 |   387
+ 2026-07-01 00:00:00+09 |   419
+ 2026-08-01 00:00:00+09 |   433
+ 2026-09-01 00:00:00+09 |   433
+ 2026-10-01 00:00:00+09 |   431
+ 2026-11-01 00:00:00+09 |   410
+ 2026-12-01 00:00:00+09 |   360
+(12 rows)
+-- 통계정보 갱신
+analyze production_lot;
+
+-- 통계 정보 확인
+select MIN(unnest(string_to_array(most_common_vals::text, ','))) from pg_stats where tablename = 'production_lot' and attname = 'production_date' order by 1 ;
+-- 또는 
+SELECT MIN(translate(val, '{}', '')),MAX(translate(val, '{}', ''))
+FROM (
+    SELECT unnest(string_to_array(most_common_vals::text, ',')) AS val
+    FROM pg_stats 
+    WHERE tablename = 'production_lot' 
+      AND attname = 'production_date'
+) t;
+
+--신규 리프 파티션 생성
+ALTER TABLE production_lot ADD PARTITION p202701 START ('2027-01-01') INCLUSIVE END ('2027-02-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202702 START ('2027-02-01') INCLUSIVE END ('2027-03-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202703 START ('2027-03-01') INCLUSIVE END ('2027-04-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202704 START ('2027-04-01') INCLUSIVE END ('2027-05-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202705 START ('2027-05-01') INCLUSIVE END ('2027-06-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202706 START ('2027-06-01') INCLUSIVE END ('2027-07-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202707 START ('2027-07-01') INCLUSIVE END ('2027-08-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202708 START ('2027-08-01') INCLUSIVE END ('2027-09-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202709 START ('2027-09-01') INCLUSIVE END ('2027-10-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202710 START ('2027-10-01') INCLUSIVE END ('2027-11-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202711 START ('2027-11-01') INCLUSIVE END ('2027-12-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202712 START ('2027-12-01') INCLUSIVE END ('2028-01-01') EXCLUSIVE;
+
+kbc=# \d+ production_lot
+                                               Append-Only Columnar Table "public.production_lot"
+     Column      |         Type          | Modifiers | Storage  | Stats target | Compression Type | Compression Level | Block Size | Description
+-----------------+-----------------------+-----------+----------+--------------+------------------+-------------------+------------+-------------
+ lot_id          | bigint                |           | plain    |              | zstd             | 7                 | 32768      |
+ lot_number      | character varying(50) |           | extended |              | zstd             | 7                 | 32768      |
+ product_id      | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ equipment_id    | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ production_date | date                  |           | plain    |              | zstd             | 7                 | 32768      |
+ quantity        | integer               |           | plain    |              | zstd             | 7                 | 32768      |
+ status          | character varying(20) |           | extended |              | zstd             | 7                 | 32768      |
+Checksum: t
+Child tables: production_lot_1_prt_1,
+              production_lot_1_prt_10,
+              production_lot_1_prt_11,
+              production_lot_1_prt_12,
+              production_lot_1_prt_2,
+              production_lot_1_prt_3,
+              production_lot_1_prt_4,
+              production_lot_1_prt_5,
+              production_lot_1_prt_6,
+              production_lot_1_prt_7,
+              production_lot_1_prt_8,
+              production_lot_1_prt_9,
+              production_lot_1_prt_p202701, <-- 추가한 리프 파티션     
+              production_lot_1_prt_p202702, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202703, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202704, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202705, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202706, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202707, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202708, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202709, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202710, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202711, <-- 추가한 리프 파티션
+              production_lot_1_prt_p202712  <-- 추가한 리프 파티션
+Distributed by: (lot_id)
+Partition by: (production_date)
+Options: appendonly=true, orientation=column, compresstype=zstd, compresslevel=7
+
+-- analyze 확인
+
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    lo.statime AS last_analyze_time
+FROM
+    pg_class c
+JOIN
+    pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN
+    pg_stat_last_operation lo ON lo.objid = c.oid AND lo.staactionname = 'ANALYZE'
+WHERE
+    c.relkind = 'r' 
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast', 'gp_toolkit', 'pg_aoseg')
+    AND c.relname like 'production_lot%'
+ORDER BY
+    lo.statime ASC NULLS FIRST;
+    
+ schema_name |          table_name          |       last_analyze_time
+-------------+------------------------------+-------------------------------
+ public      | production_lot_1_prt_p202710 |
+ public      | production_lot_1_prt_p202702 |
+ public      | production_lot_1_prt_p202703 |
+ public      | production_lot_1_prt_p202707 |
+ public      | production_lot_1_prt_p202712 |
+ public      | production_lot_1_prt_p202709 |
+ public      | production_lot_1_prt_p202701 |
+ public      | production_lot_1_prt_p202708 |
+ public      | production_lot_1_prt_p202706 |
+ public      | production_lot_1_prt_p202711 |
+ public      | production_lot_1_prt_p202704 |
+ public      | production_lot_1_prt_p202705 |
+ public      | production_lot_1_prt_1       | 2026-07-29 15:57:41.598992+09
+ public      | production_lot_1_prt_2       | 2026-07-29 15:57:41.607017+09
+ public      | production_lot_1_prt_3       | 2026-07-29 15:57:41.61538+09
+ public      | production_lot_1_prt_4       | 2026-07-29 15:57:41.621632+09
+ public      | production_lot_1_prt_5       | 2026-07-29 15:57:41.62701+09
+ public      | production_lot_1_prt_6       | 2026-07-29 15:57:41.632524+09
+ public      | production_lot_1_prt_7       | 2026-07-29 15:57:41.63816+09
+ public      | production_lot_1_prt_8       | 2026-07-29 15:57:41.643297+09
+ public      | production_lot_1_prt_9       | 2026-07-29 15:57:41.648121+09
+ public      | production_lot_1_prt_10      | 2026-07-29 15:57:41.653715+09
+ public      | production_lot_1_prt_11      | 2026-07-29 15:57:41.6588+09
+ public      | production_lot_1_prt_12      | 2026-07-29 15:57:41.664473+09
+ public      | production_lot               | 2026-07-29 15:57:41.685339+09
+(25 rows)
+
+-- 신규 리프 파티션에 데이터 삽입
+
+insert into production_lot 
+select lot_id,lot_number,product_id,equipment_id,production_date + '1 year 0month'::interval ,quantity,status 
+from production_lot 
+where production_date >= '2026-01-01' and production_date <= '2026-01-31';
+
+-- analyze 확인 (root partition )
+ schema_name |          table_name          |       last_analyze_time
+-------------+------------------------------+-------------------------------
+ public      | production_lot_1_prt_p202707 |
+ public      | production_lot_1_prt_p202712 |
+ public      | production_lot_1_prt_p202709 |
+ public      | production_lot_1_prt_p202708 |
+ public      | production_lot_1_prt_p202706 |
+ public      | production_lot_1_prt_p202711 |
+ public      | production_lot_1_prt_p202704 |
+ public      | production_lot_1_prt_p202705 |
+ public      | production_lot_1_prt_p202710 |
+ public      | production_lot_1_prt_p202703 |
+ public      | production_lot_1_prt_p202702 |
+ public      | production_lot_1_prt_2       | 2026-07-29 15:57:41.607017+09
+ public      | production_lot_1_prt_3       | 2026-07-29 15:57:41.61538+09
+ public      | production_lot_1_prt_4       | 2026-07-29 15:57:41.621632+09
+ public      | production_lot_1_prt_5       | 2026-07-29 15:57:41.62701+09
+ public      | production_lot_1_prt_6       | 2026-07-29 15:57:41.632524+09
+ public      | production_lot_1_prt_7       | 2026-07-29 15:57:41.63816+09
+ public      | production_lot_1_prt_8       | 2026-07-29 15:57:41.643297+09
+ public      | production_lot_1_prt_9       | 2026-07-29 15:57:41.648121+09
+ public      | production_lot_1_prt_10      | 2026-07-29 15:57:41.653715+09
+ public      | production_lot_1_prt_11      | 2026-07-29 15:57:41.6588+09
+ public      | production_lot_1_prt_12      | 2026-07-29 15:57:41.664473+09
+ public      | production_lot               | 2026-07-29 15:57:41.685339+09 <-- root partition 통계 갱신 없음
+ public      | production_lot_1_prt_1       | 2026-07-29 15:57:41.607017+09
+ public      | production_lot_1_prt_p202701 | 2026-07-29 16:11:45.346186+09 <-- 신규 데이터  
+(25 rows)
+
+-- 데이터 추가한 리프 파티션만 analyze 
+analyze production_lot_1_prt_p202701;
+
+-- root partition 통계 확인 (2027-01-01 이후의 통계정보가 없음)
+
+SELECT MIN(translate(val, '{}', '')),MAX(translate(val, '{}', ''))
+FROM (
+    SELECT unnest(string_to_array(most_common_vals::text, ',')) AS val
+    FROM pg_stats 
+    WHERE tablename = 'production_lot' 
+      AND attname = 'production_date'
+) t;
+    min     |    max
+------------+------------
+ 2026-01-06 | 2026-12-26
+(1 row)
+
+-- 나머지 리프 파티션 analyze 
+
+analyze  production_lot_1_prt_p202702;
+analyze  production_lot_1_prt_p202703;
+analyze  production_lot_1_prt_p202704;
+analyze  production_lot_1_prt_p202705;
+analyze  production_lot_1_prt_p202706;
+analyze  production_lot_1_prt_p202707;
+analyze  production_lot_1_prt_p202708;
+analyze  production_lot_1_prt_p202709;
+analyze  production_lot_1_prt_p202710;
+analyze  production_lot_1_prt_p202711;
+analyze  production_lot_1_prt_p202712;
+
+-- analyze 작업 확인 (나머지 리프 파티션이 모두 analyze 가 되니 root partition에도 통계가 갱신되는 것이 확인 됨)
+ schema_name |          table_name          |       last_analyze_time
+-------------+------------------------------+-------------------------------
+ public      | production_lot_1_prt_2       | 2026-07-29 15:57:41.607017+09
+ public      | production_lot_1_prt_3       | 2026-07-29 15:57:41.61538+09
+ public      | production_lot_1_prt_4       | 2026-07-29 15:57:41.621632+09
+ public      | production_lot_1_prt_5       | 2026-07-29 15:57:41.62701+09
+ public      | production_lot_1_prt_6       | 2026-07-29 15:57:41.632524+09
+ public      | production_lot_1_prt_7       | 2026-07-29 15:57:41.63816+09
+ public      | production_lot_1_prt_8       | 2026-07-29 15:57:41.643297+09
+ public      | production_lot_1_prt_9       | 2026-07-29 15:57:41.648121+09
+ public      | production_lot_1_prt_10      | 2026-07-29 15:57:41.653715+09
+ public      | production_lot_1_prt_11      | 2026-07-29 15:57:41.6588+09
+ public      | production_lot_1_prt_12      | 2026-07-29 15:57:41.664473+09
+ public      | production_lot_1_prt_1       | 2026-07-29 16:10:27.547845+09
+ public      | production_lot_1_prt_p202701 | 2026-07-29 16:11:45.346186+09
+ public      | production_lot_1_prt_p202702 | 2026-07-29 16:17:29.536129+09
+ public      | production_lot_1_prt_p202703 | 2026-07-29 16:17:29.539537+09
+ public      | production_lot_1_prt_p202704 | 2026-07-29 16:17:29.541548+09
+ public      | production_lot_1_prt_p202705 | 2026-07-29 16:17:29.544026+09
+ public      | production_lot_1_prt_p202706 | 2026-07-29 16:17:29.545944+09
+ public      | production_lot_1_prt_p202707 | 2026-07-29 16:17:29.547992+09
+ public      | production_lot_1_prt_p202708 | 2026-07-29 16:17:29.549927+09
+ public      | production_lot_1_prt_p202709 | 2026-07-29 16:17:29.551927+09
+ public      | production_lot_1_prt_p202710 | 2026-07-29 16:17:29.553697+09
+ public      | production_lot_1_prt_p202711 | 2026-07-29 16:17:29.555474+09
+ public      | production_lot_1_prt_p202712 | 2026-07-29 16:17:31.000932+09
+ public      | production_lot               | 2026-07-29 16:17:31.026454+09
+(25 rows)
+
+-- 통계 직접 조회 (2027-01-XX 테이터가 확인됩니다.)
+SELECT MIN(translate(val, '{}', '')),MAX(translate(val, '{}', ''))
+FROM (
+    SELECT unnest(string_to_array(most_common_vals::text, ',')) AS val
+    FROM pg_stats 
+    WHERE tablename = 'production_lot' 
+      AND attname = 'production_date'
+) t;
+    min     |    max
+------------+------------
+ 2026-01-06 | 2027-01-27 
+
+-- 최종 결론
+
+1. 리프 파티션을 추가한 경우 반드시 추가한 리프파티션 테이블을 analyze를 해야 합니다.
+2. 모든 리프 파티션의 통계 실행내역이 있어야 일부 리프 파티션만 analize 작업만으로도 root partition 에도 통계가 자동으로 갱신됩니다.
