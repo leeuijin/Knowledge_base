@@ -336,3 +336,7 @@ FROM (
 
 1. 리프 파티션을 추가한 경우 반드시 추가한 리프파티션 테이블을 analyze를 해야 합니다.
 2. 모든 리프 파티션의 통계 실행내역이 있어야 일부 리프 파티션만 analize 작업만으로도 root partition 에도 통계가 자동으로 갱신됩니다.
+
+-- ANALYZE가 수행된 지 24시간이 지났거나, 단 한 번도 수행되지 않은(NULL) 테이블을 찾는 SQL 쿼리
+
+https://github.com/leeuijin/Knowledge_base/blob/main/3_gp_analyze_not_yet.txt
