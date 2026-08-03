@@ -63,4 +63,24 @@ CREATE VIEW pg_stat_user_indexes_gpdb6 AS
 FROM pg_stat_all_indexes_gpdb6
 WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
 	AND schemaname !~ '^pg_toast';
+gpadmin=# select * from pg_stat_user_indexes_gpdb6;
+
+ex) 
+select * from pg_stat_user_indexes_gpdb6 where indexrelname = 'idx_test_enc_10';
+ relid  | indexrelid | schemaname |        relname        |        indexrelname        | idx_scan | idx_tup_read | idx_tup_fetch
+--------+------------+------------+-----------------------+----------------------------+----------+--------------+---------------
+ 136994 |     137652 | public     | test_enc_10           | idx_test_enc_10            |        0 |            0 |             0
+
+gpadmin=# select col01 from public.test_enc_10 where col01 = '\xc30d04070302f38b4deb88d679f17fd251014a986b0e5c26b4e92e305aefeae0cae9e798dd19190ef4dc01630a793224f7ccb69f118fbfa374eddec6f7f8cb0a8de0a9cc8fbfbc1883eea667732bd7e4122c507bba1faa3beda332ff3e7b71180f81' ;
+                                                                                                 col01
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ \xc30d04070302f38b4deb88d679f17fd251014a986b0e5c26b4e92e305aefeae0cae9e798dd19190ef4dc01630a793224f7ccb69f118fbfa374eddec6f7f8cb0a8de0a9cc8fbfbc1883eea667732bd7e4122c507bba1faa3beda332ff3e7b71180f81
+(1 row)
+
+gpadmin=# select  * from pg_stat_user_indexes_gpdb6;
+ relid  | indexrelid | schemaname |        relname        |        indexrelname        | idx_scan | idx_tup_read | idx_tup_fetch
+--------+------------+------------+-----------------------+----------------------------+----------+--------------+---------------
+ 136994 |     137652 | public     | test_enc_10           | idx_test_enc_10            |        4 |            1 |             0
+
+
 
