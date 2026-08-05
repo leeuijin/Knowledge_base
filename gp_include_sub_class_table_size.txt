@@ -1,0 +1,153 @@
+pg_relaton_size() + pg_indexes_size() 사이즈가 pg_total_relation_size() 와 차이가 발생하는 원인
+
+근본 원인 : TOAST 및 AO/CO 관리용 보조 테이블 용량이 누락되어 pg_total_relation_size() 측정값과 차이가 발생
+
+- Greenplum에서 테이블을 생성한 경우 테이블 형태에 따라 내부적으로 데이터를 효율적으로 관리하기 위해 내부적으로 다양한 보조 테이블과 인덱스가 자동으로 생성되고 관리
+
+문제의 용량의 차이는 보조 테이블(Class)가 사용하는 용량에 의해 차이가 발생하는것을 확인
+
+즉, pg_relaton_size() + pg_indexes_size() + TOAST 및 보조 테이블 및 인덱스 용량 이 측정된 pg_total_relation_size() 입니다.
+
+각각의 보조 테이블(Class)의 역할
+
+Greenplum 보조 테이블 및 인덱스 종류
+
+	1) TOAST 관련 (대용량 데이터 처리)	하나의 데이터 블록(32KB)에 다 들어가지 않는 아주 큰 텍스트나 이미지 데이터(TEXT, VARCHAR, BYTEA 등)를 처리할 때 데이터를 잘게 쪼개서 별도의 공간에 저장합니다.	관련 클레스 : toast_size,toast_index_size	
+	2) AO Row-Oriented 관리 보조 테이블 (행 기반 대용량 압축 테이블)Append-Only 방식으로 테이블을 생성할 경우 각 세그먼트 파일의 총 행(Row) 수, 파일 크기 등의 '메타데이터'를 관리하는 보조 테이블이 생성됩니다.	관련 클레스 : toast_size,toast_index_size	
+	3) Column-Oriented 관리 보조테이블 (열 기반 대용량 압축 테이블)Append-Only Column Store Segment 방식으로 테이블을 생성할 경우 컬럼 기반 테이블에서 각 컬럼을 구성하는 물리적 파일들의 메타데이터(행 수, 압축 정보 등)를 추적하고 관리하는 보조 테이블이 생성됩니다.	관련 클레스 : aocsseg_size,aocsseg_index_size	
+	4) Visibility Map 관련 (데이터 삭제 및 수정 추적)AO 테이블의 가장 큰 특징은 데이터를 덮어쓰거나 그 자리에서 삭제할 수 없다는 점입니다. 따라서 DELETE나 UPDATE를 수행하면, 실제 데이터를 지우지 않고 "이 데이터는 지워졌다, 유효하지 않다" 라고 색인 작업을 합니다.	aovisimap_size,aovisimap_index_size	
+	5)Block Directory 관리 보조테이블 (인덱스 지원)	사용자가 AO 테이블에 인덱스를 생성할 때 자동으로 만들어집니다. 논리적인 행 번호(Tuple ID)를 실제 파일의 물리적 블록 위치(Offset)로 매핑(번역)해 주는 디렉터리를 관리합니다. 예를 들어 AO 테이블에 B-Tree index 를 만들때 실제 파일의 물리 블럭을 관리하기 위해 사용됩니다.	관련 클레스 : aoblkdir_size,aoblkdir_index_size
+
+pg_relaton_size() + pg_indexes_size() 를 제외한 크기는 위의 보조 테이블의 사이즈 차이로 발생하는것을 확인하였으며 보조 테이블을 포함한 사이즈가 pg_total_relation_size() 값과 동일한것을 확인
+
+각각의 테이블 별로 보조 테이블(Class)가 차지하는 용량을 조회하는 쿼리
+
+WITH target_tables AS (
+    SELECT 
+        n.nspname AS schema_name,
+        c.relname AS table_name,
+        c.oid AS main_oid,
+        c.reltoastrelid AS toast_oid
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE c.relkind = 'r' 
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'gp_toolkit')
+      -- AND c.relname = 'production_lot_1_prt_1'
+),
+aux_tables AS (
+    SELECT 
+        t.main_oid,
+        
+        -- [1] Main 테이블 사이즈 (main, fsm, vm, init 모두 합산)
+        COALESCE(pg_relation_size(t.main_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(t.main_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(t.main_oid, 'vm'), 0) +
+        COALESCE(pg_relation_size(t.main_oid, 'init'), 0) AS main_table_size,
+        
+        -- 테이블의 인덱스 사이즈
+        COALESCE(pg_indexes_size(t.main_oid), 0) AS main_index_size,
+        
+        -- TOAST 테이블 OID
+        t.toast_oid,
+        
+        -- [4] Append-Only 보조 테이블들의 OID 찾기
+        (SELECT oid FROM pg_class WHERE relname = 'pg_aoseg_' || t.main_oid) AS aoseg_oid,
+        (SELECT oid FROM pg_class WHERE relname = 'pg_aocsseg_' || t.main_oid) AS aocsseg_oid,
+        (SELECT oid FROM pg_class WHERE relname = 'pg_aovisimap_' || t.main_oid) AS aovisimap_oid,
+        (SELECT oid FROM pg_class WHERE relname = 'pg_aoblkdir_' || t.main_oid) AS aoblkdir_oid
+    FROM target_tables t
+),
+size_calc AS (
+    SELECT
+        t.schema_name,
+        t.table_name,
+        a.main_oid,
+        
+        a.main_table_size,
+        a.main_index_size,
+        
+        -- TOAST (데이터 + 인덱스)
+        COALESCE(pg_relation_size(a.toast_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(a.toast_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(a.toast_oid, 'vm'), 0) AS toast_size,
+        COALESCE(pg_indexes_size(a.toast_oid), 0) AS toast_index_size,
+        
+        -- AOSEG (Row 테이블용 데이터 + 인덱스)
+        COALESCE(pg_relation_size(a.aoseg_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(a.aoseg_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(a.aoseg_oid, 'vm'), 0) AS aoseg_size,
+        COALESCE(pg_indexes_size(a.aoseg_oid), 0) AS aoseg_index_size,
+        
+        -- AOCSSEG (Column 테이블용 데이터 + 인덱스)
+        COALESCE(pg_relation_size(a.aocsseg_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(a.aocsseg_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(a.aocsseg_oid, 'vm'), 0) AS aocsseg_size,
+        COALESCE(pg_indexes_size(a.aocsseg_oid), 0) AS aocsseg_index_size,
+        
+        -- AOVISIMAP (Visibility 맵 데이터 + 인덱스)
+        COALESCE(pg_relation_size(a.aovisimap_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(a.aovisimap_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(a.aovisimap_oid, 'vm'), 0) AS aovisimap_size,
+        COALESCE(pg_indexes_size(a.aovisimap_oid), 0) AS aovisimap_index_size,
+        
+        -- AOBLKDIR (Block 디렉토리 데이터 + 인덱스)
+        COALESCE(pg_relation_size(a.aoblkdir_oid, 'main'), 0) +
+        COALESCE(pg_relation_size(a.aoblkdir_oid, 'fsm'), 0) +
+        COALESCE(pg_relation_size(a.aoblkdir_oid, 'vm'), 0) AS aoblkdir_size,
+        COALESCE(pg_indexes_size(a.aoblkdir_oid), 0) AS aoblkdir_index_size
+
+    FROM target_tables t
+    JOIN aux_tables a ON t.main_oid = a.main_oid
+)
+SELECT 
+    schema_name,
+    table_name,
+    main_table_size,
+    main_index_size,
+    toast_size,
+    toast_index_size,
+    aoseg_size,
+    aoseg_index_size,
+    aocsseg_size,
+    aocsseg_index_size,
+    -- aovisimap_size,
+    -- aovisimap_index_size,
+    -- aoblkdir_size,
+    -- aoblkdir_index_size,
+    
+    -- 수동으로 합산한 전체 사이즈
+    (main_table_size + main_index_size + 
+     toast_size + toast_index_size + 
+     aoseg_size + aoseg_index_size + 
+     aocsseg_size + aocsseg_index_size + 
+     aovisimap_size + aovisimap_index_size + 
+     aoblkdir_size + aoblkdir_index_size) AS manual_total_size,
+     
+    -- pg_total_relation_size 로 측정된 사이즈
+    pg_total_relation_size(main_oid) AS pg_total_relation_size,
+    
+    -- 일치 여부 확인
+    (main_table_size + main_index_size + 
+     toast_size + toast_index_size + 
+     aoseg_size + aoseg_index_size + 
+     aocsseg_size + aocsseg_index_size + 
+     aovisimap_size + aovisimap_index_size + 
+     aoblkdir_size + aoblkdir_index_size) = pg_total_relation_size(main_oid) AS is_matched
+FROM size_calc
+ORDER BY schema_name, table_name;
+
+조회 결과 예)
+
+1. 아주 큰 텍스트나 이미지 데이터 타입을 관리하는 테이블 조회 예)
+- toast 관련 보조 class 사이즈가 확인
+
+2. AO Row-Oriented 관리 보조 테이블 조회 예)
+- aoseg 관련 보조 class 사이즈가 확인
+
+3. AO/CO(Append-Only Column Store Segment) 테이블 조회 예)
+- aocsseg 관련 보조 class 사이즈가 확인
+ 
+참고 사항)
+manual_total_size :  SUM(데이터+인덱스+보조테이블)
+pg_total_relation_size : pg_total_relation_size() 로 측정된 사이즈
+is_matched : manual_total_size와 pg_total_relation_size 사이즈가 동일한지 확인 플래그 값
