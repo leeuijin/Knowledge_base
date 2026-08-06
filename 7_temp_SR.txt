@@ -1,0 +1,123 @@
+Subject: Inquiry regarding Root Partition Statistics Non-Update Issue When Unanalyzed Leaf Partitions Exist
+
+1. Executive Summary
+We observed an issue in partitioned tables where statistics for the Root Partition fail to automatically update when data changes occur, if any single newly added leaf partition lacks an initial ANALYZE history.
+
+Root Cause Identified: If any leaf partition has never been analyzed (i.e., last_analyze_time is NULL), the automatic statistics aggregation/merge process to the root partition—controlled by optimizer_analyze_root_partition = on—does not trigger, even when data is inserted into an already analyzed leaf partition.
+
+Workaround/Current Behavior: Every single leaf partition must undergo at least one explicit ANALYZE operation (even if empty) for the system to maintain up-to-date Root Partition statistics dynamically upon subsequent DML operations.
+
+Impact: Outdated root-level statistics lead the query optimizer to generate suboptimal execution plans.
+
+2. Conclusion & Key Findings
+When adding new leaf partitions, an explicit ANALYZE must be executed on every newly created partition before automatic root-level statistics maintenance functions properly.
+
+If even a single leaf partition has never been analyzed, changes in other leaf partitions will fail to propagate statistics up to the Root Partition.
+
+3. Questions & Clarification Request
+Expected vs. Actual Behavior:
+Should root partition statistics require all leaf partitions to have prior ANALYZE execution history to trigger automatic updates? Is this design intended or a known limitation?
+
+Design Rationale:
+Is there a specific technical reason why newly added leaf partitions are not automatically initialized or analyzed upon creation, or why the optimizer bypasses root stats merge when an unanalyzed partition exists?
+
+Feature / Improvement Request:
+Can an option or fix be provided so that adding a new partition automatically triggers an initial ANALYZE (or initializes its stats metadata), preventing the breaking of automatic root statistics updates?
+
+4.Reproduction Test Case
+
+1)Create a Partitioned Table & Insert Initial Data
+DROP TABLE IF EXISTS production_lot;
+
+CREATE TABLE production_lot (
+    lot_id BIGINT,
+    lot_number VARCHAR(50),
+    product_id INT,
+    equipment_id INT,
+    production_date DATE,
+    quantity INT,
+    status VARCHAR(20)
+)
+WITH (
+    appendoptimized=true,
+    orientation=column,
+    compresstype=zstd,
+    compresslevel=7
+)
+DISTRIBUTED BY (lot_id)
+PARTITION BY RANGE (production_date)
+(
+    START ('2026-01-01') END ('2026-12-31') EVERY (INTERVAL '1 month')
+);
+
+-- Insert dummy data for 2026
+INSERT INTO production_lot
+SELECT 
+    gs AS lot_id,
+    'LOT-'||to_char(gs,'FM000000') AS lot_number,
+    (random()*9+1)::int AS product_id,
+    (random()*4+1)::int AS equipment_id,
+    DATE '2026-01-01' + (random()*360)::int AS production_date,
+    (random()*9000+1000)::int AS quantity,
+    CASE WHEN random() < 0.92 THEN 'COMPLETED'
+         WHEN random() < 0.97 THEN 'IN_PROGRESS'
+         ELSE 'SCRAPPED' END
+FROM generate_series(1,5000) gs;
+
+-- Analyze root table
+ANALYZE production_lot;
+2) Add New Leaf Partitions for 2027 (Unanalyzed)
+ALTER TABLE production_lot ADD PARTITION p202701 START ('2027-01-01') INCLUSIVE END ('2027-02-01') EXCLUSIVE;
+ALTER TABLE production_lot ADD PARTITION p202702 START ('2027-02-01') INCLUSIVE END ('2027-03-01') EXCLUSIVE;
+-- [p202703 ~ p202712 added similarly]
+At this stage, pg_stat_last_operation shows last_analyze_time as NULL for all newly added partitions (p202701 through p202712).
+
+3) Insert Data into p202701 & ANALYZE Only That Partition
+-- Insert data into the 2027-01 partition
+INSERT INTO production_lot 
+SELECT lot_id, lot_number, product_id, equipment_id, production_date + '1 year'::interval, quantity, status 
+FROM production_lot 
+WHERE production_date >= '2026-01-01' AND production_date <= '2026-01-31';
+
+-- Analyze only the updated leaf partition
+ANALYZE production_lot_1_prt_p202701;
+
+4) Check Root Partition Statistics
+SELECT MIN(translate(val, '{}', '')), MAX(translate(val, '{}', ''))
+FROM (
+    SELECT unnest(string_to_array(most_common_vals::text, ',')) AS val
+    FROM pg_stats 
+    WHERE tablename = 'production_lot' 
+      AND attname = 'production_date'
+) t;
+
+-- Result:
+--    min     |    max    
+-- -----------+------------
+--  2026-01-06| 2026-12-26  <-- Root partition stats DO NOT contain 2027 data
+Observation: Even though p202701 was analyzed, the Root Partition statistics were not updated to reflect 2027 data because partitions p202702 through p202712 were never analyzed.
+
+5) Run ANALYZE on ALL Remaining Leaf Partitions
+ANALYZE production_lot_1_prt_p202702;
+ANALYZE production_lot_1_prt_p202703;
+-- ... [ANALYZE through p202712] ...
+
+6) Re-check Root Partition Statistics
+SELECT MIN(translate(val, '{}', '')), MAX(translate(val, '{}', ''))
+FROM (
+    SELECT unnest(string_to_array(most_common_vals::text, ',')) AS val
+    FROM pg_stats 
+    WHERE tablename = 'production_lot' 
+      AND attname = 'production_date'
+) t;
+
+-- Result:
+--    min     |    max    
+-- -----------+------------
+--  2026-01-06| 2027-01-27  <-- Root partition stats NOW updated successfully
+
+
+
+
+
+
