@@ -1,28 +1,24 @@
 Subject: Inquiry regarding Root Partition Statistics Non-Update Issue When Unanalyzed Leaf Partitions Exist
 
 1. Executive Summary
-We observed an issue in partitioned tables where statistics for the Root Partition fail to automatically update when data changes occur, if any single newly added leaf partition lacks an initial ANALYZE history.
-
-Root Cause Identified: If any leaf partition has never been analyzed (i.e., last_analyze_time is NULL), the automatic statistics aggregation/merge process to the root partition—controlled by optimizer_analyze_root_partition = on—does not trigger, even when data is inserted into an already analyzed leaf partition.
-
-Workaround/Current Behavior: Every single leaf partition must undergo at least one explicit ANALYZE operation (even if empty) for the system to maintain up-to-date Root Partition statistics dynamically upon subsequent DML operations.
-
-Impact: Outdated root-level statistics lead the query optimizer to generate suboptimal execution plans.
+    We observed an issue in partitioned tables where statistics for the Root Partition fail to automatically update when data changes occur, if any single newly added leaf partition lacks an initial ANALYZE history.
+    Root Cause Identified: If any leaf partition has never been analyzed (i.e., last_analyze_time is NULL), the automatic statistics aggregation/merge process to the root partition—controlled by optimizer_analyze_root_partition = on—does not trigger, even when data is inserted into an already analyzed leaf partition.
+    Workaround/Current Behavior: Every single leaf partition must undergo at least one explicit ANALYZE operation (even if empty) for the system to maintain up-to-date Root Partition statistics dynamically upon subsequent DML operations.
+    Impact: Outdated root-level statistics lead the query optimizer to generate suboptimal execution plans.
 
 2. Conclusion & Key Findings
-When adding new leaf partitions, an explicit ANALYZE must be executed on every newly created partition before automatic root-level statistics maintenance functions properly.
-
-If even a single leaf partition has never been analyzed, changes in other leaf partitions will fail to propagate statistics up to the Root Partition.
+    When adding new leaf partitions, an explicit ANALYZE must be executed on every newly created partition before automatic root-level statistics maintenance functions properly.
+    If even a single leaf partition has never been analyzed, changes in other leaf partitions will fail to propagate statistics up to the Root Partition.
 
 3. Questions & Clarification Request
-Expected vs. Actual Behavior:
-Q1.Should root partition statistics require all leaf partitions to have prior ANALYZE execution history to trigger automatic updates? Is this design intended or a known limitation?
-
-Design Rationale:
-Q2.Is there a specific technical reason why newly added leaf partitions are not automatically initialized or analyzed upon creation, or why the optimizer bypasses root stats merge when an unanalyzed partition exists?
-
-Feature / Improvement Request:
-Q3.Can an option or fix be provided so that adding a new partition automatically triggers an initial ANALYZE (or initializes its stats metadata), preventing the breaking of automatic root statistics updates?
+    Expected vs. Actual Behavior:
+    Q1.Should root partition statistics require all leaf partitions to have prior ANALYZE execution history to trigger automatic updates? Is this design intended or a known limitation?
+    
+    Design Rationale:
+    Q2.Is there a specific technical reason why newly added leaf partitions are not automatically initialized or analyzed upon creation, or why the optimizer bypasses root stats merge when an unanalyzed partition exists?
+    
+    Feature / Improvement Request:
+    Q3.Can an option or fix be provided so that adding a new partition automatically triggers an initial ANALYZE (or initializes its stats metadata), preventing the breaking of automatic root statistics updates?
 
 4.Reproduction Test
 
