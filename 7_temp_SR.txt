@@ -16,15 +16,15 @@ If even a single leaf partition has never been analyzed, changes in other leaf p
 
 3. Questions & Clarification Request
 Expected vs. Actual Behavior:
-Should root partition statistics require all leaf partitions to have prior ANALYZE execution history to trigger automatic updates? Is this design intended or a known limitation?
+Q1.Should root partition statistics require all leaf partitions to have prior ANALYZE execution history to trigger automatic updates? Is this design intended or a known limitation?
 
 Design Rationale:
-Is there a specific technical reason why newly added leaf partitions are not automatically initialized or analyzed upon creation, or why the optimizer bypasses root stats merge when an unanalyzed partition exists?
+Q2.Is there a specific technical reason why newly added leaf partitions are not automatically initialized or analyzed upon creation, or why the optimizer bypasses root stats merge when an unanalyzed partition exists?
 
 Feature / Improvement Request:
-Can an option or fix be provided so that adding a new partition automatically triggers an initial ANALYZE (or initializes its stats metadata), preventing the breaking of automatic root statistics updates?
+Q3.Can an option or fix be provided so that adding a new partition automatically triggers an initial ANALYZE (or initializes its stats metadata), preventing the breaking of automatic root statistics updates?
 
-4.Reproduction Test Case
+4.Reproduction Test
 
 1)Create a Partitioned Table & Insert Initial Data
 DROP TABLE IF EXISTS production_lot;
