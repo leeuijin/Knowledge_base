@@ -1,0 +1,122 @@
+Greenplum 7.7.0 부터 TDE 암호화 적용이 가능합니다.
+
+[요약]
+  - Greenplum 7.7.0 부터 TDE 암호화 적용이 가능합니다.
+	- 공식 매뉴얼에는 gpctl로 가이드 되었지만 기존에 사용하던 gpinitsystem 파일을 수정하여 사용도 가능함을 확인했습니다.
+	- 암호화 키의 암호화 방식은 Plain(암호화X), MD5, SHA256, AES256 을 진행해 봤으며 TDE 적용 결과 문제 없음을 확인했습니다.
+	- TDE 데이터파일 암호화 방식은 AES256-CBC 로만 테스트 진행해보았습니다.
+
+[적용 절차]    
+
+1. 암호화 키만들기 (KMS 키) 
+
+	1)디렉토리 생성
+	sudo mkdir -p /etc/greenplum
+
+	2)암호화 알고리즘별 master.key 파일 만들기
+
+	[Plain file]
+	echo -n "changeme_greenplum" > /etc/greenplum/master.key
+	[gpadmin@localhost ~]$ cat /etc/greenplum/master.key
+	changeme_greenplum
+	
+	[SHA256]
+	echo -n "changeme_greenplum" | sha256sum | awk '{print $1}' | sudo tee /etc/greenplum/master.key > /dev/null
+	[gpadmin@localhost ~]$ cat /etc/greenplum/master.key
+	dab79686d1817bbff32b21b61e891132bc7736957209846f6b6577563af22910
+	
+	[AES256]
+	echo -n "changeme_greenplum" | openssl enc -aes-256-cbc -pbkdf2 -a -pass pass:"changeme" | sudo tee /etc/greenplum/master.key > /dev/null
+	-- 참고 : "chageme" 는 AES 대칭키입니다. 키복호화시 반드시 필요 합니다.
+
+	[gpadmin@localhost ~]$ cat /etc/greenplum/master.key
+	U2FsdGVkX18DuyfWz859CLCzU0xzPuClGy8RtaWp5t3ZwJp39jIh3R7/MFv2Rr5U
+	sudo cat /etc/greenplum/master.key | openssl enc -d -aes-256-cbc -pbkdf2 -a -pass pass:"changeme"
+	출력결과: changeme_greenplum
+
+	[MD5]
+	echo -n "changeme_greenplum" | md5sum | awk '{print $1}' | sudo tee /etc/greenplum/master.key > /dev/null
+	[gpadmin@localhost ~]$ cat /etc/greenplum/master.key
+	39b2fc2442600615568a57865821999b
+
+	3)소유권 및 권한 설정 (gpadmin 계정만 읽기 가능)
+	sudo chown gpadmin:gpadmin /etc/greenplum/master.key
+	sudo chmod 400 /etc/greenplum/master.key
+
+2. gpinitsystem_config 파일 수정 (아래 내용 추)
+
+	# -----------------------------------------------------------------
+	# TDE (Transparent Data Encryption) 설정
+	# -----------------------------------------------------------------
+	TDE_ALGORITHM="aes-256-ctr"
+	TDE_KEY_WRAP_COMMAND="openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key"
+	TDE_KEY_UNWRAP_COMMAND="openssl enc -d -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key"
+
+
+
+3. 데이터베이스 생성 
+	gpinitsystem -c ./gpinitsystem_config -n C -h ./hostfile_seg
+
+
+
+4. TDE 체크 하는 법
+
+	1) 환경 설정 값 확인
+	[gpadmin@localhost gpseg-1]$ gpconfig -s gp_tde_algorithm
+	Values on all segments are consistent
+	GUC              : gp_tde_algorithm
+	Coordinator value: aes-256-ctr
+	Segment     value: aes-256-ctr
+	[gpadmin@localhost gpseg-1]$ gpconfig -s gp_tde_key_wrap_command
+	Values on all segments are consistent
+	GUC              : gp_tde_key_wrap_command
+	Coordinator value: openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key
+	Segment     value: openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key
+	[gpadmin@localhost gpseg-1]$ gpconfig -s gp_tde_key_unwrap_command
+	Values on all segments are consistent
+	GUC              : gp_tde_key_unwrap_command
+	Coordinator value: openssl enc -d -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key
+	Segment     value: openssl enc -d -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key
+
+	2) 데이터 베이스 적용 확인 (예제)
+	gpadmin=# CREATE TABLE tde_test (id int, val text);
+	NOTICE:  Table doesn't have 'DISTRIBUTED BY' clause -- Using column named 'id' as the Greenplum Database data distribution key for this table.
+	HINT:  The 'DISTRIBUTED BY' clause determines the distribution of data. Make sure column(s) chosen are the optimal data distribution key to minimize skew.
+	CREATE TABLE
+	gpadmin=# INSERT INTO tde_test VALUES (1, 'secret_tde_data_check');
+	INSERT 0 1
+	gpadmin=# SELECT gp_segment_id FROM tde_test WHERE id = 1;
+	NOTICE:  One or more columns in the following table(s) do not have statistics: tde_test
+	HINT:  For non-partitioned tables, run analyze <table_name>(<column_list>). For partitioned tables, run analyze rootpartition <table_name>(<column_list>). See log for columns missing statistics.
+	 gp_segment_id
+	---------------
+	             1
+	(1 row)
+
+	gpadmin=# SELECT pg_relation_filepath('tde_test')
+	gpadmin-# FROM gp_dist_random('gp_id')
+	gpadmin-# WHERE gp_segment_id = 1;
+	 pg_relation_filepath
+	----------------------
+	 base/19070/16384
+	(1 row)
+
+	gpadmin=# SELECT hostname, datadir
+	gpadmin-# FROM gp_segment_configuration
+	gpadmin-# WHERE content = 1; -- (위에서 확인한 gp_segment_id 값)
+	       hostname        |          datadir
+	-----------------------+----------------------------
+	 localhost.localdomain | /data/data2/primary/gpseg1
+	(1 row)
+
+	gpadmin=# \q
+	[gpadmin@localhost gpseg-1]$ strings /data/data2/primary/gpseg1/base/19070/16384 | grep "secret_tde_data_check"
+
+	나오지 않는 경우 정상적으로 TDE 가 적용 되어 평문이 안보인다는 의미 
+
+	[참고] TDE 암호화 미적용시
+
+	[gpadmin@localhost 19070]$ strings /data/data2/primary/gpseg1/base/19070/16384 | grep "secret_tde_data_check"
+	secret_tde_data_check
+
+  평문이 보이면 암호화가 적용되지 않았다는 의미
