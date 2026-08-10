@@ -119,4 +119,4 @@ Greenplum 7.7.0 부터 TDE 암호화 적용이 가능합니다.
 	[gpadmin@localhost 19070]$ strings /data/data2/primary/gpseg1/base/19070/16384 | grep "secret_tde_data_check"
 	secret_tde_data_check
 
-  평문이 보이면 암호화가 적용되지 않았다는 의미
+  	평문이 보이면 암호화가 적용되지 않았다는 의미
