@@ -1,7 +1,9 @@
+#aws cli setup
 [gpadmin@mdw ~]$ aws configure 
 access_key     ****************cQkT 
 secret_key     ****************FwyJ 
 
+#aws env check
 [gpadmin@mdw ~]$ aws configure list
       Name                    Value             Type    Location
       ----                    -----             ----    --------
