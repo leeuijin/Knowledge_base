@@ -1,0 +1,83 @@
+[gpadmin@mdw ~]$ aws configure 
+access_key     ****************cQkT 
+secret_key     ****************FwyJ 
+
+[gpadmin@mdw ~]$ aws configure list
+      Name                    Value             Type    Location
+      ----                    -----             ----    --------
+   profile                <not set>             None    None
+access_key     ****************cQkT shared-credentials-file
+secret_key     ****************FwyJ shared-credentials-file
+    region                <not set>             None    None
+
+[gpadmin@mdw s3_schema_backup]$ cat backup_gp_schema.sh
+#!/bin/bash
+
+# ==========================================
+# 설정 변수
+# ==========================================
+
+PGHOST="localhost"                # Greenplum Master Host
+PGPORT="5432"                     # Greenplum Port
+PGUSER="gpadmin"                  # Greenplum User
+DB_NAME="kbc"                     # 백업 대상 데이터베이스명
+
+END_POINT_URL="http://172.16.200.161:9000"
+S3_BUCKET="s3://luj/dp/schema_backups" 	 		               # S3 경로
+LOCAL_BACKUP_DIR="/tmp/gp_schema_backup"                   # 임시 저장 디렉터리
+RETENTION_DAYS=7                                           # 로컬 임시 파일 보관 일수
+
+DATE=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="${LOCAL_BACKUP_DIR}/${DB_NAME}_schema_${DATE}.sql.gz"
+LOG_FILE="${LOCAL_BACKUP_DIR}/backup.log"
+
+
+# AWS CLI 경로 
+AWS_CLI="/usr/local/bin/aws"
+
+# ==========================================
+# 백업 실행
+# ==========================================
+mkdir -p "${LOCAL_BACKUP_DIR}"
+
+# echo $AWS_ACCESS_KEY_ID >> "${LOG_FILE}"
+# echo $AWS_SECRET_ACCESS_KEY >> "${LOG_FILE}"
+
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] ${DB_NAME} 스키마 백업 시작" >> "${LOG_FILE}"
+
+# 1. 스키마만 추출 후 압축 (-s: schema-only)
+pg_dump -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${DB_NAME}" -s | gzip > "${BACKUP_FILE}"
+
+if [ $? -eq 0 ]; then
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] 로컬 백업 완료: ${BACKUP_FILE}" >> "${LOG_FILE}"
+
+    # 2. AWS S3 업로드
+    ${AWS_CLI} s3 cp "${BACKUP_FILE}" "${S3_BUCKET}/${DB_NAME}_schema_${DATE}.sql.gz" --endpoint-url "${END_POINT_URL}" >> "${LOG_FILE}" 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] AWS S3 업로드 성공" >> "${LOG_FILE}"
+    else
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] AWS S3 업로드 실패" >> "${LOG_FILE}"
+        exit 1
+    fi
+else
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] 스키마 백업(pg_dump) 실패" >> "${LOG_FILE}"
+    exit 1
+fi
+
+# 3. 로컬 오래된 임시 백업 파일 정리
+find "${LOCAL_BACKUP_DIR}" -name "${DB_NAME}_schema_*.sql.gz" -mtime +${RETENTION_DAYS} -exec rm -f {} \;
+
+실행 예)
+[gpadmin@mdw s3_schema_backup]$ ./backup_gp_schema.sh
+실행 로그)
+[gpadmin@mdw gp_schema_backup]$ tail -f backup.log
+[2026-08-14 00:30:14] kbc 스키마 백업 시작
+[2026-08-14 00:30:14] 로컬 백업 완료: /tmp/gp_schema_backup/kbc_schema_20260814_003014.sql.gz
+upload: ../../../tmp/gp_schema_backup/kbc_schema_20260814_003014.sql.gz to s3://luj/dp/schema_backups/kbc_schema_20260814_003014.sql.gz
+[2026-08-14 00:30:21] AWS S3 업로드 성공
+
+crontab 적용 예)
+매주 토요일 오전 9 시 실행
+0 9 * * 6 /bin/bash /path/to/backup_gp_schema.sh > /dev/null 2>&1
+
