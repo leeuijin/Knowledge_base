@@ -1,0 +1,156 @@
+테스트 목적 : TDE가 적용된 데이터베이스와 적용되지 않은 데이터베이스 간 데이터 연동 테스트
+
+테스트 항목 : gpcopy, greenplum_fdw, pxf 
+
+테스트 기본 환경 :  
+	172.16.200.161 : Greenplum Database 6.32.1 hostname : gp6
+	172.16.200.191 : Greenplum Database 7.7.1 hostname : gp7 (TDE 적용)
+	gpcopy v2.9.6
+
+1) gpcopy 설치 (gp6,gp7 모두 해당)
+
+[gpadmin@mdw pkg]$ tar xzvf gpcopy-2.9.6.tar.gz 
+gpcopy-2.9.6/
+gpcopy-2.9.6/gpcopy
+gpcopy-2.9.6/gpcopy_helper
+gpcopy-2.9.6/open_source_license_gpcopy.txt
+gpcopy-2.9.6/README
+[gpadmin@mdw pkg]$ cd gpcopy-2.9.6
+[gpadmin@mdw gpcopy-2.9.6]$ ls
+gpcopy  gpcopy_helper  open_source_license_gpcopy.txt  README
+[gpadmin@mdw gpcopy-2.9.6]$ cp gpcopy $GPHOME/bin
+[gpadmin@mdw gpcopy-2.9.6]$ cp gpcopy_helper $GPHOME/bin
+[gpadmin@mdw gpcopy-2.9.6]$ chmod 755 $GPHOME/bin/gpcopy
+[gpadmin@mdw gpcopy-2.9.6]$ chmod 755 $GPHOME/bin/gpcopy_helper
+
+gpscp -h sdw1 -h sdw2 gpcopy_helper =:/usr/local/greenplum-db/bin
+gpssh -h sdw1 -h sdw2 -e 'chmod 755 /usr/local/greenplum-db/bin/gpcopy_helper'
+
+2) 테스트 테이블 및 더미 데이터 생성
+
+https://github.com/leeuijin/gp_mcp/blob/main/00_CRT_TEST_DATABASE.txt
+
+#참고 
+    테스트 시 사용할 테이블 kbc.public.production_lot 생성 옵션 
+    Partition by: (production_date)
+    Options: appendonly=true, orientation=column, compresstype=zstd, compresslevel=7
+
+3) gpcopy 테스트 (테이블)
+
+#Coordinator(마스터) 경유 전송 (양방향 성공)
+  gpcopy --source-host 172.16.200.161 --source-port 5432 --source-user gpadmin \
+    --dest-host 172.16.200.191 --dest-port 5432 --dest-user gpadmin \
+    --include-table kbc.public.production_lot --truncate \
+    --on-segment-threshold -2
+
+  gpcopy --source-host 172.16.200.191 --source-port 5432 --source-user gpadmin \
+    --dest-host 172.16.200.161 --dest-port 5432 --dest-user gpadmin \
+    --include-table kbc.public.production_lot --truncate \
+    --on-segment-threshold -2
+
+#Coordinator(마스터) 비 경유 전송 (세그먼트 간 직접 전송, 양방향 성공) 
+  gpcopy --source-host 172.16.200.161 --source-port 5432 --source-user gpadmin \
+    --dest-host 172.16.200.191 --dest-port 5432 --dest-user gpadmin \
+    --dest-mapping-file /home/gpadmin/dest_hosts.map \
+    --include-table kbc.public.production_lot --truncate 
+
+  gpcopy --source-host 172.16.200.191 --source-port 5432 --source-user gpadmin \
+    --dest-host 172.16.200.161 --dest-port 5432 --dest-user gpadmin \
+    --dest-mapping-file /home/gpadmin/dest_hosts.map \
+    --include-table kbc.public.production_lot --truncate 
+
+참고 : 
+이슈1) [ERROR]:-dialing to 127.0.0.1:36161 time out: dial tcp 127.0.0.1:36161: connect: connection refused 발생
+--dest-mapping-file 옵션을 사용하여 맵핑 파일을 생성 후 사용
+이슈2) Error: No host map for the host: localhost.localdomain 메세지가 발생하는 경우 
+-- 맵핑 파일항목 마지막에 host 명에 localhost.localdomain,[MDW_IP] 추가하면 에러 발생하지 않음
+
+gp6기준 로컬(gp6->gp7)
+[gpadmin@mdw ~]$ cat /home/gpadmin/dest_hosts.map
+gp7,172.16.200.191
+sdw1,172.16.200.191
+sdw2,172.16.200.191
+localhost.localdomain,172.16.200.191
+
+gp7기준 로컬(gp7->gp6)
+[gpadmin@localhost ~]$ cat /home/gpadmin/dest_hosts.map
+gp6,172.16.200.161
+sdw1,172.16.200.163
+sdw2,172.16.200.164
+localhost.localdomain,172.16.200.161
+
+
+#gpcopy 테스트 (데이터베이스)
+
+특정 데이터베이스의 전체 gpcopy 로 이관 (양방향 성공)
+
+gpcopy --source-host '172.16.200.161' --source-port 5432 --source-user 'gpadmin' \
+  --dest-host '172.16.200.191' --dest-port 5432 --dest-user 'gpadmin' \
+  --dest-mapping-file /home/gpadmin/dest_hosts.map \
+  --dbname 'kbc' \
+  --dest-dbname 'kbc7' \
+  --truncate
+
+gpcopy --source-host '172.16.200.191' --source-port 5432 --source-user 'gpadmin' \
+  --dest-host '172.16.200.161' --dest-port 5432 --dest-user 'gpadmin' \
+  --dest-mapping-file /home/gpadmin/dest_hosts.map \
+  --dbname 'kbc7' \
+  --dest-dbname 'kbc' \
+  --truncate
+
+  참고) 실행 로그 일부 
+
+20260814:04:13:15.073427 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  24/38  [===========================
+20260814:04:13:15.636545 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  25/38  [===========================
+20260814:04:13:15.889012 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  26/38  [===========================
+20260814:04:13:16.378506 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  27/38  [===========================
+20260814:04:13:16.555985 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  28/38  [===========================
+20260814:04:13:16.859989 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  29/38  [===========================
+20260814:04:13:16.995584 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  30/38  [===========================
+20260814:04:13:17.598456 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  31/38  [===========================
+20260814:04:13:17.741118 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  32/38  [===========================
+20260814:04:13:18.134275 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  33/38  [===========================
+20260814:04:13:18.27707 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  34/38  [============================
+20260814:04:13:18.43585 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  35/38  [============================
+20260814:04:13:18.571043 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  36/38  [===========================
+20260814:04:13:19.590008 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  37/38  [==================================================] 100.0% [Data copied: 125.72 MB/125.72 MB]
+
+20260814:04:13:49.047327 gpcopy:gpadmin:gp7:106667-[INFO]:-Table copied:  38/38  [==================================================] 100.0% [Data copied: 125.72 MB/125.72 MB]
+20260814:04:13:49.047459 gpcopy:gpadmin:gp7:106667-[INFO]:-[kbc7] Finished copying database "Progress: (1/1) DBs, (38/38) tables done"
+20260814:04:13:49.479497 gpcopy:gpadmin:gp7:106667-[INFO]:-Copy completed successfully
+20260814:04:13:49.480212 gpcopy:gpadmin:gp7:106667-[INFO]:-=== Final Results ===
+20260814:04:13:49.480287 gpcopy:gpadmin:gp7:106667-[INFO]:-Total Tables: 38
+20260814:04:13:49.480304 gpcopy:gpadmin:gp7:106667-[INFO]:-Successfully Copied: 38
+20260814:04:13:49.480313 gpcopy:gpadmin:gp7:106667-[INFO]:-Failed: 0
+20260814:04:13:49.480324 gpcopy:gpadmin:gp7:106667-[INFO]:-Total Size Copied: 125.72 MB
+20260814:04:13:49.480356 gpcopy:gpadmin:gp7:106667-[INFO]:-Total elapsed time: 43.846610751s
+20260814:04:13:49.480373 gpcopy:gpadmin:gp7:106667-[INFO]:-------------------------------------------------
+20260814:04:13:49.480401 gpcopy:gpadmin:gp7:106667-[INFO]:-Data transfer rate 0B/h on coordinator, the actual duration for executing the COPY command is 0s
+20260814:04:13:49.480414 gpcopy:gpadmin:gp7:106667-[INFO]:-Data transfer rate 10.4GB/h on segment 0, the actual duration for executing the COPY command is 1.019053378s
+20260814:04:13:49.480424 gpcopy:gpadmin:gp7:106667-[INFO]:-Data transfer rate 12GB/h on segment 1, the actual duration for executing the COPY command is 1.091143332s
+20260814:04:13:49.480433 gpcopy:gpadmin:gp7:106667-[INFO]:-Data transfer rate 12.3GB/h on segment 2, the actual duration for executing the COPY command is 51.854435962s
+20260814:04:13:49.480442 gpcopy:gpadmin:gp7:106667-[INFO]:-Data transfer rate 12GB/h on segment 3, the actual duration for executing the COPY command is 55.586861573s
+20260814:04:13:49.48045 gpcopy:gpadmin:gp7:106667-[INFO]:-Copied 1 databases
+20260814:04:13:49.48046 gpcopy:gpadmin:gp7:106667-[INFO]:-	Database kbc7: successfully copied 38 tables, skipped 0 tables, failed 0 tables
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
