@@ -63,7 +63,7 @@ https://github.com/leeuijin/gp_mcp/blob/main/00_CRT_TEST_DATABASE.txt
 이슈1) [ERROR]:-dialing to 127.0.0.1:36161 time out: dial tcp 127.0.0.1:36161: connect: connection refused 발생
 --dest-mapping-file 옵션을 사용하여 맵핑 파일을 생성 후 사용
 이슈2) Error: No host map for the host: localhost.localdomain 메세지가 발생하는 경우 
--- 맵핑 파일항목 마지막에 host 명에 localhost.localdomain,[MDW_IP] 추가하면 에러 발생하지 않음
+-- 맵핑 파일항목 마지막에 host 명에 localhost.localdomain,[TARGET_MDW_IP] 추가하면 에러 발생하지 않음
 
 gp6기준 로컬(gp6->gp7)
 [gpadmin@mdw ~]$ cat /home/gpadmin/dest_hosts.map
