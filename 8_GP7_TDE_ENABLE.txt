@@ -52,14 +52,15 @@ Greenplum 7.7.0 부터 TDE 암호화 적용이 가능합니다.
 	TDE_KEY_WRAP_COMMAND="openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key"
 	TDE_KEY_UNWRAP_COMMAND="openssl enc -d -aes-256-cbc -salt -pbkdf2 -pass file:/etc/greenplum/master.key"
 
+3. 모든 세그먼트 노드에 복사
+	gpscp -f /data/staging/hostfile /etc/greenplum/master.key =:/etc/greenplum/
 
-
-3. 데이터베이스 생성 
+4. 데이터베이스 생성 
 	gpinitsystem -c ./gpinitsystem_config -n C -h ./hostfile_seg
 
 
 
-4. TDE 체크 하는 법
+5. TDE 체크 하는 법
 
 	1) 환경 설정 값 확인
 	[gpadmin@localhost gpseg-1]$ gpconfig -s gp_tde_algorithm
