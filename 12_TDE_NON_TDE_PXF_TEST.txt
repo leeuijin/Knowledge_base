@@ -1,0 +1,140 @@
+테스트 목적 : TDE 가 적용되지 않은 데이터베이스에서 생성한 s3 외부 테이블을 TDE 가 적용된 데이터베이스에서 읽기/쓰기가 가능한지 확인
+
+테스트 환경 : 
+v6 (Non-TDE)	: DB- 6.32.1  , PXF version 6.7.0  
+v7 (TDE) 		  : DB- 7.7.1   , PXF version 8.0.3
+
+테스트 시나리오 : S3(MinIO)를 통한 s3:parquet, s3:text 테스트
+
+테스트 결과
+1. v6에서 생성한 외부테이블 v7 TDE에서 읽기/ 쓰기 결과 : 성공
+2. v7 (TDE 적용)에서 생성한 외부테이블을 v6에서 읽기/ 쓰기 결과 : 성공
+
+테스트 세부 내용
+==========================================================================
+#v6 (s3:text)
+==========================================================================
+CREATE EXTERNAL TABLE stock_fact_external (
+stock text,
+stock_date text,
+price text
+)
+LOCATION('pxf://luj/stocks.csv?PROFILE=s3:text&SERVER=minio')
+FORMAT 'TEXT'(DELIMITER=',');
+
+CREATE WRITABLE EXTERNAL TABLE w_stock_fact_external (
+stock text,
+stock_date text,
+price text
+)
+LOCATION('pxf://luj/stocks.csv?PROFILE=s3:text&SERVER=minio')
+FORMAT 'TEXT'(DELIMITER=',');
+==========================================================================
+#v7 (s3:text)
+==========================================================================
+CREATE EXTERNAL TABLE stock_fact_external (
+stock text,
+stock_date text,
+price text
+)
+LOCATION('pxf://luj/stocks.csv?PROFILE=s3:text&SERVER=minio')
+FORMAT 'TEXT'(DELIMITER=',');
+
+CREATE WRITABLE EXTERNAL TABLE w_stock_fact_external (
+stock text,
+stock_date text,
+price text
+)
+LOCATION('pxf://luj/stocks.csv?PROFILE=s3:text&SERVER=minio')
+FORMAT 'TEXT'(DELIMITER=',');
+==========================================================================
+#v6 (s3:text)
+==========================================================================
+gpadmin=# select * from stock_fact_external;
+ stock | stock_date | price
+-------+------------+-------
+ 1     | 1          | 1
+(1 row)
+
+gpadmin=# insert into w_stock_fact_external values('v6_insert','2','2');
+INSERT 0 1
+==========================================================================
+#v7 (s3:text)
+==========================================================================
+gpadmin=# select * from stock_fact_external;
+   stock   | stock_date | price
+-----------+------------+-------
+ 1         | 1          | 1
+ v6_insert | 2          | 2
+(2 rows)
+
+gpadmin=# insert into w_stock_fact_external values('v7_insert','3','3');
+INSERT 0 1
+==========================================================================
+#v6 (s3:text)
+==========================================================================
+gpadmin=# select * from stock_fact_external;
+   stock   | stock_date | price
+-----------+------------+-------
+ v7_insert | 3          | 3
+ v6_insert | 2          | 2
+ 1         | 1          | 1
+(3 rows)
+
+==========================================================================
+#v6 (s3:parquet) -> 양방향 문제 없음
+#v7 (s3:parquet) -> 양방향 문제 없음
+
+        CREATE WRITABLE EXTERNAL TABLE ext_w_test (c1 numeric, c2 text)
+         LOCATION ('pxf://luj/test.parquet?PROFILE=s3:parquet&SERVER=minio')
+          FORMAT 'CUSTOM' (FORMATTER='pxfwritable_export');
+
+        insert into ext_w_test values (1.000000000,'1.000000000');
+
+        CREATE EXTERNAL TABLE ext_r_test (c1 numeric, c2 text)
+         LOCATION ('pxf://luj/test.parquet?PROFILE=s3:parquet&SERVER=minio')
+          FORMAT 'CUSTOM' (FORMATTER='pxfwritable_import');
+
+========================================================================
+pxf 8.0 트러블 슈팅 내용
+========================================================================
+
+case1)
+
+[gpadmin@gp7 conf]$ pxf cluster start
+Starting PXF on coordinator host and 1 segment host...
+ERROR: PXF failed to start on 1 out of 2 hosts
+mdw ==> Removing stale PID file
+Starting PXF with properties:...
+
+[gpadmin@gp7 logs]$ tail -f pxf-service-5888.log
+	at org.springframework.util.ReflectionUtils.getDeclaredMethods(ReflectionUtils.java:454) ~[spring-core-6.2.20.jar!/:6.2.20]
+	... 30 more
+Caused by: java.lang.ClassNotFoundException: org.apache.thrift.TBase
+	at java.base/java.net.URLClassLoader.findClass(URLClassLoader.java:445) ~[?:?]
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:592) ~[?:?]
+	at org.springframework.boot.loader.net.protocol.jar.JarUrlClassLoader.loadClass(JarUrlClassLoader.java:96) ~[pxf-app-8.0.3.jar:8.0.3]
+	at org.springframework.boot.loader.launch.LaunchedClassLoader.loadClass(LaunchedClassLoader.java:80) ~[pxf-app-8.0.3.jar:8.0.3]
+	at java.base/java.lang.ClassLoader.loadClass(ClassLoader.java:525) ~[?:?]
+	... 46 more
+#해결방법
+
+cd /usr/local/pxf-gp7/clusters/default/lib
+wget https://repo1.maven.org/maven2/org/apache/thrift/libthrift/0.13.0/libthrift-0.13.0.jar
+
+case2)
+
+gpadmin=#         CREATE EXTERNAL TABLE ext_r_test (c1 numeric, c2 text)
+gpadmin-#          LOCATION ('pxf://luj/test.parquet?PROFILE=s3:parquet&SERVER=minio')
+gpadmin-#           FORMAT 'CUSTOM' (FORMATTER='pxfwritable_import');
+ERROR:  invalid value for configuration parameter "pxf.pxf_base": parameter cannot be empty
+HINT:  Please run "pxf register" command to set "pxf.pxf_base" parameter.
+발생시
+
+환경 변수로 $PXF_BASE 설정해도 문제 발생
+
+아래와 같이 명령서 실행시 셋팅하여 각 단계 실행
+PXF_BASE=/usr/local/pxf-gp7 pxf cluster prepare
+PXF_BASE=/usr/local/pxf-gp7 pxf cluster register
+PXF_BASE=/usr/local/pxf-gp7 pxf cluster sync
+pxf cluster restart
