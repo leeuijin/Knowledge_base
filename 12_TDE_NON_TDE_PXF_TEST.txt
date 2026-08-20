@@ -2,7 +2,7 @@
 
 테스트 환경 : 
 v6 (Non-TDE)	: DB- 6.32.1  , PXF version 6.7.0  
-v7 (TDE) 		  : DB- 7.7.1   , PXF version 8.0.3
+v7 (TDE) 		: DB- 7.7.1   , PXF version 8.0.3
 
 테스트 시나리오 : S3(MinIO)를 통한 s3:parquet, s3:text 테스트
 
