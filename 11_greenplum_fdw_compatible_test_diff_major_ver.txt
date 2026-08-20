@@ -1,0 +1,156 @@
+# 그린플럼 메이져 버젼에 따른 상호 호환성 테스트 항목 : greenplum_fdw  
+
+===============================================================================================================================================================
+| 테스트 시나리오 (Source ➔ Target)  | 병렬 처리 옵션 지원 (mpp_execute 'all segments') | 호환성 결과 | 상세 내용 및 비고 |
+===============================================================================================================================================================
+| GPDB v6 ➔ GPDB v7 			| ❌ 불가 (인증/연결 에러) 			| ⚠️ 부분 지원 	| • v6 ➔ v7 병렬 처리 프로토콜 호환성 한계 • 세그먼트 간 직접 전송 불가 • 해당 옵션 제외 후 마스터 노드를 통해서만 사용 가능 |
+| GPDB v7 ➔ GPDB v6 			| ⭕ 지원 (정상 작동) 				  | ✅ 전체 지원 	| • FDW 병렬 처리 프로토콜 하위 호환성 완벽 보장 • 옵션 사용 시 문제없이 세그먼트 간 병렬 처리 가능 |
+| GPDB v7 ➔ GPDB v7 			| ⭕ 지원 (정상 작동) 				  | ✅ 전체 지원 	| • 동일 버전 간 완벽 호환 |
+
+테스트 시나리오)
+
+	1) GPDB v6 -> GPDB v7
+
+	v6와 v7 간의 FDW 병렬 처리 프로토콜 호환성 한계로 mpp_execute 'all segments' 옵션을 쓸수 없음, 즉, 세그먼트 간 직접 전송이 불가하여 마스터노드를 통해서만 greenplum_fdw를 사용 가능
+	greenplum_fdw 상위 버젼 호화성은 반쪽 지원 
+
+	2) GPDB v7 -> GPDB v6
+
+	v7와 v6 간의 FDW 병렬 처리 프로토콜 하위 버젼 호환성은 모두 지원 됩니다.
+
+	3) GPDB v7 -> GPDB v7 
+
+	당연히 됩니다.
+
+
+테스트 스크립트)
+
+GPDB v6 : 172.16.200.161 
+GPDB v7 : 172.16.200.191 
+
+1) GPDB v6 -> GPDB v7
+
+	v6)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+	CREATE EXTENSION IF NOT EXISTS gp_parallel_retrieve_cursor;
+	v7)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+
+	v6)
+	DROP SERVER gp6_to_gp7 CASCADE;
+
+	CREATE SERVER gp6_to_gp7 
+	FOREIGN DATA WRAPPER greenplum_fdw 
+	OPTIONS (
+	host '172.16.200.191', 
+	port '5432', 
+	dbname 'kbc', 
+	mpp_execute 'all segments', 
+	num_segments '4'
+	);
+	CREATE USER MAPPING FOR gpadmin SERVER gp6_to_gp7 OPTIONS (user 'gpadmin', password 'changeme');
+
+    CREATE FOREIGN TABLE fdw_gp7_production_lot (
+    lot_id BIGINT,
+    lot_number VARCHAR(50),
+    product_id INT,
+    equipment_id INT,
+    production_date DATE,
+    quantity INT,
+    status VARCHAR(20) 
+    ) 
+       	SERVER gp6_to_gp7 
+       	OPTIONS (schema_name 'public', table_name 'production_lot');
+
+    문제 발생)
+
+  gpadmin=# select count(*) from fdw_gp7_production_lot;
+	ERROR:  could not connect to server "gp6_to_gp7"  (seg0 slice1 172.16.200.163:6000 pid=4253)
+	DETAIL:  FATAL:  Authentication failure (Wrong password or no endpoint for the user)
+
+	pg_hba.conf 에 host     all         all             172.16.200.0/0          md5, trust 등록해도 안됨
+
+	v6와 v7 간의 FDW 병렬 처리 프로토콜 호환성 한계, SERVER 생성시 mpp_execute 'all segments' 를 주석 처리하면 정상 작동 
+
+2) GPDB v7 -> GPDB v6
+
+
+	v7)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+	v6)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+	CREATE EXTENSION IF NOT EXISTS gp_parallel_retrieve_cursor;
+
+	v6)
+	DROP SERVER gp7_to_gp6 CASCADE;
+
+	CREATE SERVER gp7_to_gp6 
+	FOREIGN DATA WRAPPER greenplum_fdw OPTIONS ( host '172.16.200.161', 
+	port '5432', 
+	dbname 'kbc', 
+	mpp_execute 'all segments', 
+	num_segments '4'
+	);
+	CREATE USER MAPPING FOR gpadmin SERVER gp7_to_gp6 OPTIONS (user 'gpadmin', password 'changeme');
+
+	DROP FOREIGN TABLE fdw_gp6_production_lot;
+    CREATE FOREIGN TABLE fdw_gp6_production_lot (
+    lot_id BIGINT,
+    lot_number VARCHAR(50),
+    product_id INT,
+    equipment_id INT,
+    production_date DATE,
+    quantity INT,
+    status VARCHAR(20) 
+    ) 
+       	SERVER gp7_to_gp6 
+       	OPTIONS (schema_name 'public', table_name 'production_lot');	
+
+	kbc=# select count(*) from fdw_gp6_production_lot;
+	 count
+	-------
+	 18288
+	(1 row)
+
+	v7에서 v6 간의 FDW 병렬 처리 프로토콜 하위 호환성을 가짐 mpp_execute 'all segments' 문제 없음
+
+3) GPDB v7 <-> GPDB v7
+
+	GPDB v7 : 172.16.200.191 
+	GPDB v7_2 : 172.16.200.192
+
+	v7)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+	v7)
+	CREATE EXTENSION IF NOT EXISTS greenplum_fdw;
+
+	v7)
+	DROP SERVER gp7_to_gp7 CASCADE;
+
+	CREATE SERVER gp7_to_gp7 
+	FOREIGN DATA WRAPPER greenplum_fdw OPTIONS ( host '172.16.200.192', 
+	port '5432', 
+	dbname 'kbc', 
+	mpp_execute 'all segments', 
+	num_segments '2'
+	);
+	CREATE USER MAPPING FOR gpadmin SERVER gp7_to_gp7 OPTIONS (user 'gpadmin', password 'changeme');
+
+	DROP FOREIGN TABLE fdw_gp7_production_lot;
+    CREATE FOREIGN TABLE fdw_gp7_production_lot (
+    lot_id BIGINT,
+    lot_number VARCHAR(50),
+    product_id INT,
+    equipment_id INT,
+    production_date DATE,
+    quantity INT,
+    status VARCHAR(20) 
+    ) 
+       	SERVER gp7_to_gp7 
+       	OPTIONS (schema_name 'public', table_name 'production_lot');	
+
+	kbc=# select count(*) from fdw_gp7_production_lot;
+	 count
+	-------
+	  5000
+	(1 row)
