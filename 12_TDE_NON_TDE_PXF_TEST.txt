@@ -124,9 +124,9 @@ wget https://repo1.maven.org/maven2/org/apache/thrift/libthrift/0.13.0/libthrift
 
 case2)
 
-gpadmin=#         CREATE EXTERNAL TABLE ext_r_test (c1 numeric, c2 text)
-gpadmin-#          LOCATION ('pxf://luj/test.parquet?PROFILE=s3:parquet&SERVER=minio')
-gpadmin-#           FORMAT 'CUSTOM' (FORMATTER='pxfwritable_import');
+gpadmin=# CREATE EXTERNAL TABLE ext_r_test (c1 numeric, c2 text)
+gpadmin-# LOCATION ('pxf://luj/test.parquet?PROFILE=s3:parquet&SERVER=minio')
+gpadmin-# FORMAT 'CUSTOM' (FORMATTER='pxfwritable_import');
 ERROR:  invalid value for configuration parameter "pxf.pxf_base": parameter cannot be empty
 HINT:  Please run "pxf register" command to set "pxf.pxf_base" parameter.
 발생시
