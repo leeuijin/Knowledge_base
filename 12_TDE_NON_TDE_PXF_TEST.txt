@@ -133,8 +133,10 @@ HINT:  Please run "pxf register" command to set "pxf.pxf_base" parameter.
 
 환경 변수로 $PXF_BASE 설정해도 문제 발생
 
+#해결방법
 아래와 같이 명령서 실행시 셋팅하여 각 단계 실행
 PXF_BASE=/usr/local/pxf-gp7 pxf cluster prepare
 PXF_BASE=/usr/local/pxf-gp7 pxf cluster register
 PXF_BASE=/usr/local/pxf-gp7 pxf cluster sync
-pxf cluster restart
+pxf cluster restart 이후 문제 발생하지 않음
+
